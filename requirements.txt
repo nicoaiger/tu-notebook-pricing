@@ -1,1 +1,3 @@
-\nflask\nsqlalchemy\ngunicorn\n
+flask
+sqlalchemy
+gunicorn
