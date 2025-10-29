@@ -1,0 +1,1 @@
+\nweb: gunicorn app_precios_v2:app\n
