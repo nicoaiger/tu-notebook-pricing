@@ -379,7 +379,7 @@ Precio ML (ARS)  = redondear_599_999( PV Neto USD * dolar * coef_ml_X + envio_ml
     )
     return page(body, title="Ayuda | " + APP_TITLE)
 
-@app.route("/variables", methods=["GET", "POST'])
+@app.route("/variables", methods=["GET", "POST"])
 def variables():
     init_db()
     if request.method == "POST":
