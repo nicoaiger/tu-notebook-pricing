@@ -20,6 +20,61 @@ SECRET_KEY = "dev-secret"  # cambia esto en producción
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
+from functools import wraps
+from flask import session
+
+# ==============================
+# Autenticación simple
+# ==============================
+USERS = {
+    "nico": "vindur2025",
+    "adrian": "admin4050",
+    # Podés agregar más usuarios así: "usuario": "contraseña"
+}
+
+def login_required(view_func):
+    """Decorator para proteger rutas internas"""
+    @wraps(view_func)
+    def wrapped_view(**kwargs):
+        if "user" not in session:
+            flash("Iniciá sesión para acceder.")
+            return redirect(url_for("login"))
+        return view_func(**kwargs)
+    return wrapped_view
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username", "").strip().lower()
+        password = request.form.get("password", "").strip()
+        if USERS.get(username) == password:
+            session["user"] = username
+            flash(f"Bienvenido, {username}.")
+            return redirect(url_for("home"))
+        else:
+            flash("Usuario o contraseña incorrectos.")
+            return redirect(url_for("login"))
+
+    body = r"""
+    <div class="max-w-sm mx-auto mt-10 p-6 bg-white rounded shadow">
+      <h1 class="text-xl font-semibold mb-3 text-center">Iniciar sesión</h1>
+      <form method="post" class="grid gap-3">
+        <input name="username" placeholder="Usuario" class="border p-2 rounded" />
+        <input name="password" type="password" placeholder="Contraseña" class="border p-2 rounded" />
+        <button class="px-3 py-2 bg-slate-900 text-white rounded">Entrar</button>
+      </form>
+    </div>
+    """
+    return page(body, title="Login | " + APP_TITLE)
+
+
+@app.route("/logout")
+def logout():
+    session.pop("user", None)
+    flash("Sesión cerrada correctamente.")
+    return redirect(url_for("login"))
+
 # ==============================
 # Force HTTPS redirect
 # ==============================
@@ -281,6 +336,7 @@ def calculate_prices(vars: Dict[str, float], fob_usd: float, weight_kg: float) -
 # Routes
 # ==============================
 @app.route("/")
+@login_required
 def home():
     init_db()
     db = get_db()
@@ -390,6 +446,7 @@ Precio ML (ARS)  = redondear_599_999( PV Neto USD * dolar * coef_ml_X + envio_ml
     return page(body, title="Ayuda | " + APP_TITLE)
 
 @app.route("/variables", methods=["GET", "POST"])
+@login_required
 def variables():
     init_db()
     if request.method == "POST":
@@ -445,6 +502,7 @@ def variables():
     return page(body, title="Variables | " + APP_TITLE)
 
 @app.route("/product/new", methods=["GET", "POST"])
+@login_required
 def new_product():
     init_db()
     if request.method == "POST":
@@ -492,6 +550,7 @@ def new_product():
     return page(body, title="Nuevo producto | " + APP_TITLE)
 
 @app.route("/product/<int:pid>", methods=["GET", "POST"])
+@login_required
 def edit_product(pid: int):
     init_db()
     db = get_db()
@@ -568,6 +627,7 @@ def edit_product(pid: int):
     return page(body, title=f"Editar {p['sku']} | " + APP_TITLE)
 
 @app.route("/recalc-all")
+@login_required
 def recalc_all():
     init_db()
     db = get_db()
