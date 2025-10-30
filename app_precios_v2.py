@@ -21,6 +21,16 @@ app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
 # ==============================
+# Force HTTPS redirect
+# ==============================
+@app.before_request
+def enforce_https():
+    # Solo aplicar en entorno de producción
+    if request.headers.get("X-Forwarded-Proto", "http") != "https":
+        url = request.url.replace("http://", "https://", 1)
+        return redirect(url, code=301)
+
+# ==============================
 # Templating (Tailwind minimal)
 # ==============================
 BASE_HTML = r"""
