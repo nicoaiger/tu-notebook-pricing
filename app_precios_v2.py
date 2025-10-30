@@ -159,19 +159,30 @@ def init_db():
               brand TEXT NOT NULL,
               name TEXT NOT NULL,
               sku TEXT NOT NULL UNIQUE,
-              weight_kg REAL NOT NULL DEFAULT 0,
-              fob_usd REAL NOT NULL DEFAULT 0
+              fob_usd REAL NOT NULL DEFAULT 0,
+              peso_kg REAL NOT NULL DEFAULT 0,
+              costo_flete_usd_kg REAL NOT NULL DEFAULT 4.20,
+              costo_financiero REAL NOT NULL DEFAULT 0.04,
+              arancel REAL NOT NULL DEFAULT 0.16,
+              aduana REAL NOT NULL DEFAULT 0.0053,
+              despachante REAL NOT NULL DEFAULT 0.0095,
+              banco REAL NOT NULL DEFAULT 0.0040,
+              iva REAL NOT NULL DEFAULT 0.21,
+              envio_ars REAL NOT NULL DEFAULT 0,
+              margen_neto REAL NOT NULL DEFAULT 0.06,
+              precio_manual_ars REAL DEFAULT NULL,
+              updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
 
             CREATE TABLE IF NOT EXISTS price_history (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               product_id INTEGER NOT NULL,
-              price_web_ars REAL NOT NULL,
-              price_ml1_ars REAL NOT NULL,
-              price_ml3_ars REAL NOT NULL,
-              price_ml6_ars REAL NOT NULL,
-              price_ml9_ars REAL NOT NULL,
-              price_ml12_ars REAL NOT NULL,
+              precio_web_ars REAL NOT NULL,
+              precio_ml1_ars REAL NOT NULL,
+              precio_ml3_ars REAL NOT NULL,
+              precio_ml6_ars REAL NOT NULL,
+              precio_ml9_ars REAL NOT NULL,
+              precio_ml12_ars REAL NOT NULL,
               created_at TEXT NOT NULL,
               FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
             );
@@ -179,31 +190,19 @@ def init_db():
         )
         db.commit()
 
-    # Seed default variables if empty
+    # Variables globales (si no existen)
     if not get_variables():
-        seed = {
-            # Cotización & importación
+        defaults = {
             "dolar": "1480",
-            "costo_financiero": "0.04",
-            "costo_flete": "4.20",
-            "arancel": "0.16",
-            "aduana": "0.0053",
-            "despachante": "0.0095",
-            "banco": "0.0040",
-            # Comercial
-            "margen_neto": "0.06",
-            # Coeficientes ML
             "coef_ml_1": "1.1467",
             "coef_ml_3": "1.2698",
             "coef_ml_6": "1.4334",
             "coef_ml_9": "1.6208",
             "coef_ml_12": "1.8330",
-            # Envíos (opcional) en ARS: suman al final si >0
-            "envio_web": "0",
-            "envio_ml": "0"
+            "redondeo": "999"
         }
-        save_variables(seed)
-
+        save_variables(defaults)
+        
 def get_variables() -> Dict[str, float]:
     db = get_db()
     cur = db.execute("SELECT key, value FROM variables")
@@ -263,8 +262,9 @@ def end_599_999(value: float) -> float:
 @dataclass
 class CalcResult:
     cif_usd: float
-    costo_usd: float
+    costo_final_usd: float
     pv_neto_usd: float
+    margen_neto: float
     precio_web_ars: float
     precio_ml_1_ars: float
     precio_ml_3_ars: float
@@ -272,64 +272,68 @@ class CalcResult:
     precio_ml_9_ars: float
     precio_ml_12_ars: float
 
-def calculate_prices(vars: Dict[str, float], fob_usd: float, weight_kg: float) -> CalcResult:
-    """
-    Aplica las fórmulas definidas por el usuario:
-    CIF = (FOB + FOB*costo_financiero) + (costo_flete * peso)
-    Costo USD = CIF * (1 + (arancel + aduana + despachante + banco))
-    PV Neto USD = Costo USD * (1 + margen_neto)
-    Luego en ARS con dólar y coeficientes ML. Suma envío si está definido (>0).
-    Finalmente se redondea a terminaciones 599/999.
-    """
+
+def calculate_prices(vars: Dict[str, float], p: sqlite3.Row) -> CalcResult:
     dolar = vars.get("dolar", 1.0)
-    costo_financiero = vars.get("costo_financiero", 0.0)
-    costo_flete = vars.get("costo_flete", 0.0)
-    arancel = vars.get("arancel", 0.0)
-    aduana = vars.get("aduana", 0.0)
-    despachante = vars.get("despachante", 0.0)
-    banco = vars.get("banco", 0.0)
-    margen_neto = vars.get("margen_neto", 0.0)
+    redondeo = int(vars.get("redondeo", 999))
 
-    coef_ml_1 = vars.get("coef_ml_1", 1.0)
-    coef_ml_3 = vars.get("coef_ml_3", 1.0)
-    coef_ml_6 = vars.get("coef_ml_6", 1.0)
-    coef_ml_9 = vars.get("coef_ml_9", 1.0)
-    coef_ml_12 = vars.get("coef_ml_12", 1.0)
+    # --- datos específicos del producto ---
+    fob = float(p["fob_usd"])
+    peso = float(p["peso_kg"])
+    flete_kg = float(p["costo_flete_usd_kg"])
+    fin = float(p["costo_financiero"])
+    arancel = float(p["arancel"])
+    aduana = float(p["aduana"])
+    desp = float(p["despachante"])
+    banco = float(p["banco"])
+    iva = float(p["iva"])
+    envio_ars = float(p["envio_ars"])
+    margen = float(p["margen_neto"])
+    precio_manual = p["precio_manual_ars"]
 
-    envio_web = vars.get("envio_web", 0.0)
-    envio_ml = vars.get("envio_ml", 0.0)
+    # --- cálculos base ---
+    cif_usd = (fob + (fob * fin)) + (flete_kg * peso)
+    costo_final_usd = cif_usd * (1 + arancel + aduana + desp + banco)
 
-    cif_usd = (fob_usd + (fob_usd * costo_financiero)) + (costo_flete * weight_kg)
-    tasa_total = arancel + aduana + despachante + banco
-    costo_usd = cif_usd * (1 + tasa_total)
-    pv_neto_usd = costo_usd * (1 + margen_neto)
+    if precio_manual:
+        pv_neto_usd = (precio_manual / (1 + iva)) / dolar
+        margen_neto = ((pv_neto_usd - costo_final_usd) / costo_final_usd)
+    else:
+        pv_neto_usd = costo_final_usd * (1 + margen)
+        margen_neto = margen
 
-    # precios en ARS
-    web_raw = pv_neto_usd * dolar + envio_web
-    ml1_raw = pv_neto_usd * dolar * coef_ml_1 + envio_ml
-    ml3_raw = pv_neto_usd * dolar * coef_ml_3 + envio_ml
-    ml6_raw = pv_neto_usd * dolar * coef_ml_6 + envio_ml
-    ml9_raw = pv_neto_usd * dolar * coef_ml_9 + envio_ml
-    ml12_raw = pv_neto_usd * dolar * coef_ml_12 + envio_ml
+    # --- precios ARS ---
+    def redondear(valor: float) -> float:
+        base = int(valor)
+        miles = base // 1000
+        candidatos = [miles * 1000 + 599, miles * 1000 + redondeo, (miles + 1) * 1000 + 599, (miles + 1) * 1000 + redondeo]
+        mejor = min(candidatos, key=lambda x: abs(x - valor))
+        return mejor
 
-    # aplicar terminaciones 599/999
-    web = end_599_999(web_raw)
-    ml1 = end_599_999(ml1_raw)
-    ml3 = end_599_999(ml3_raw)
-    ml6 = end_599_999(ml6_raw)
-    ml9 = end_599_999(ml9_raw)
-    ml12 = end_599_999(ml12_raw)
+    coef1 = vars.get("coef_ml_1", 1.0)
+    coef3 = vars.get("coef_ml_3", 1.0)
+    coef6 = vars.get("coef_ml_6", 1.0)
+    coef9 = vars.get("coef_ml_9", 1.0)
+    coef12 = vars.get("coef_ml_12", 1.0)
+
+    precio_web_ars = redondear(pv_neto_usd * dolar * (1 + iva) + envio_ars)
+    precio_ml_1_ars = redondear(pv_neto_usd * dolar * (1 + iva) * coef1 + envio_ars)
+    precio_ml_3_ars = redondear(pv_neto_usd * dolar * (1 + iva) * coef3 + envio_ars)
+    precio_ml_6_ars = redondear(pv_neto_usd * dolar * (1 + iva) * coef6 + envio_ars)
+    precio_ml_9_ars = redondear(pv_neto_usd * dolar * (1 + iva) * coef9 + envio_ars)
+    precio_ml_12_ars = redondear(pv_neto_usd * dolar * (1 + iva) * coef12 + envio_ars)
 
     return CalcResult(
         cif_usd=cif_usd,
-        costo_usd=costo_usd,
+        costo_final_usd=costo_final_usd,
         pv_neto_usd=pv_neto_usd,
-        precio_web_ars=web,
-        precio_ml_1_ars=ml1,
-        precio_ml_3_ars=ml3,
-        precio_ml_6_ars=ml6,
-        precio_ml_9_ars=ml9,
-        precio_ml_12_ars=ml12,
+        margen_neto=margen_neto,
+        precio_web_ars=precio_web_ars,
+        precio_ml_1_ars=precio_ml_1_ars,
+        precio_ml_3_ars=precio_ml_3_ars,
+        precio_ml_6_ars=precio_ml_6_ars,
+        precio_ml_9_ars=precio_ml_9_ars,
+        precio_ml_12_ars=precio_ml_12_ars
     )
 
 # ==============================
@@ -346,71 +350,71 @@ def home():
 
     rows = []
     for p in products:
-        calc = calculate_prices(vars_map, p["fob_usd"], p["weight_kg"])
+        calc = calculate_prices(vars_map, p)
         rows.append((p, calc))
 
     if q:
         rows = [r for r in rows if q in r[0]["name"].lower() or q in r[0]["sku"].lower() or q in r[0]["brand"].lower()]
 
     body = render_template_string(
-        r"""
-        <div class="flex items-center justify-between mb-4">
-          <form method="get">
-            <input name="q" value="{{ q }}" placeholder="Buscar por marca, modelo o SKU" class="border p-2 rounded w-72" />
-          </form>
-          <div class="flex gap-2">
-            <a href="{{ url_for('recalc_all') }}" class="px-3 py-2 bg-emerald-700 text-white rounded">Recalcular todo</a>
-            <a href="{{ url_for('new_product') }}" class="px-3 py-2 bg-slate-900 text-white rounded">+ Nuevo producto</a>
-          </div>
-        </div>
+    r"""
+    <div class="flex items-center justify-between mb-4">
+      <form method="get">
+        <input name="q" value="{{ q }}" placeholder="Buscar por marca, modelo o SKU" class="border p-2 rounded w-72" />
+      </form>
+      <div class="flex gap-2">
+        <a href="{{ url_for('recalc_all') }}" class="px-3 py-2 bg-emerald-700 text-white rounded">Recalcular todo</a>
+        <a href="{{ url_for('new_product') }}" class="px-3 py-2 bg-slate-900 text-white rounded">+ Nuevo producto</a>
+      </div>
+    </div>
 
-        <div class="overflow-x-auto">
-        <table class="min-w-full bg-white rounded shadow">
-          <thead class="bg-slate-100 text-left text-sm">
-            <tr>
-              <th class="p-2">Marca</th>
-              <th class="p-2">Producto</th>
-              <th class="p-2">SKU</th>
-              <th class="p-2 text-right">FOB (USD)</th>
-              <th class="p-2 text-right">Peso (Kg)</th>
-              <th class="p-2 text-right">Costo USD</th>
-              <th class="p-2 text-right">PV Neto USD</th>
-              <th class="p-2 text-right">Web (ARS)</th>
-              <th class="p-2 text-right">ML 1</th>
-              <th class="p-2 text-right">ML 3</th>
-              <th class="p-2 text-right">ML 6</th>
-              <th class="p-2 text-right">ML 9</th>
-              <th class="p-2 text-right">ML 12</th>
-              <th class="p-2"></th>
-            </tr>
-          </thead>
-          <tbody class="text-sm">
-            {% for p, c in rows %}
-            <tr class="border-t">
-              <td class="p-2">{{ p['brand'] }}</td>
-              <td class="p-2">{{ p['name'] }}</td>
-              <td class="p-2 font-mono">{{ p['sku'] }}</td>
-              <td class="p-2 text-right">{{ '%.2f' % p['fob_usd'] }}</td>
-              <td class="p-2 text-right">{{ '%.2f' % p['weight_kg'] }}</td>
-              <td class="p-2 text-right">{{ '%.2f' % c.costo_usd }}</td>
-              <td class="p-2 text-right">{{ '%.2f' % c.pv_neto_usd }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_web_ars) }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_ml_1_ars) }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_ml_3_ars) }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_ml_6_ars) }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_ml_9_ars) }}</td>
-              <td class="p-2 text-right money">{{ money(c.precio_ml_12_ars) }}</td>
-              <td class="p-2 text-right">
-                <a href="{{ url_for('edit_product', pid=p['id']) }}" class="text-blue-700">Editar</a>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-        </div>
-        """,
-        rows=rows, q=q, money=money,
-    )
+    <div class="overflow-x-auto">
+    <table class="min-w-full bg-white rounded shadow">
+      <thead class="bg-slate-100 text-left text-sm">
+        <tr>
+          <th class="p-2">Marca</th>
+          <th class="p-2">Producto</th>
+          <th class="p-2">SKU</th>
+          <th class="p-2 text-right">FOB (USD)</th>
+          <th class="p-2 text-right">Costo Final USD</th>
+          <th class="p-2 text-right">Margen Neto %</th>
+          <th class="p-2 text-right">Web (ARS)</th>
+          <th class="p-2 text-right">ML 1</th>
+          <th class="p-2 text-right">ML 3</th>
+          <th class="p-2 text-right">ML 6</th>
+          <th class="p-2 text-right">ML 9</th>
+          <th class="p-2 text-right">ML 12</th>
+          <th class="p-2"></th>
+        </tr>
+      </thead>
+      <tbody class="text-sm">
+        {% for p, c in rows %}
+        <tr class="border-t hover:bg-slate-50">
+          <td class="p-2">{{ p['brand'] }}</td>
+          <td class="p-2">{{ p['name'] }}</td>
+          <td class="p-2 font-mono">{{ p['sku'] }}</td>
+          <td class="p-2 text-right">{{ '%.2f' % p['fob_usd'] }}</td>
+          <td class="p-2 text-right">{{ '%.2f' % c.costo_final_usd }}</td>
+          <td class="p-2 text-right {% if c.margen_neto < 0.05 %}text-red-600{% elif c.margen_neto < 0.1 %}text-yellow-600{% else %}text-emerald-700{% endif %}">
+            {{ '%.2f' % (c.margen_neto * 100) }}%
+          </td>
+          <td class="p-2 text-right money">{{ money(c.precio_web_ars) }}</td>
+          <td class="p-2 text-right money">{{ money(c.precio_ml_1_ars) }}</td>
+          <td class="p-2 text-right money">{{ money(c.precio_ml_3_ars) }}</td>
+          <td class="p-2 text-right money">{{ money(c.precio_ml_6_ars) }}</td>
+          <td class="p-2 text-right money">{{ money(c.precio_ml_9_ars) }}</td>
+          <td class="p-2 text-right money">{{ money(c.precio_ml_12_ars) }}</td>
+          <td class="p-2 text-right">
+            <a href="{{ url_for('edit_product', pid=p['id']) }}" class="text-blue-700 hover:underline">Editar</a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    """,
+    rows=rows, q=q, money=money,
+)
     return page(body, title="Productos | " + APP_TITLE)
 
 @app.route("/about")
@@ -502,30 +506,30 @@ def variables():
     return page(body, title="Variables | " + APP_TITLE)
 
 @app.route("/product/new", methods=["GET", "POST"])
-@login_required
 def new_product():
     init_db()
     if request.method == "POST":
-        brand = (request.form.get("brand") or "").strip()
-        name = (request.form.get("name") or "").strip()
-        sku = (request.form.get("sku") or "").strip()
-        weight = (request.form.get("weight_kg") or "0").replace(",", ".")
-        fob = (request.form.get("fob_usd") or "0").replace(",", ".")
-        try:
-            weight = float(weight)
-            fob = float(fob)
-        except ValueError:
-            flash("Datos numéricos inválidos.")
-            return redirect(url_for("new_product"))
-        if not (brand and name and sku):
+        data = {k: (request.form.get(k) or "").strip() for k in [
+            "brand", "name", "sku", "fob_usd", "peso_kg", "costo_flete_usd_kg", "costo_financiero",
+            "arancel", "aduana", "despachante", "banco", "iva", "envio_ars", "margen_neto", "precio_manual_ars"
+        ]}
+        # normalizar numéricos
+        for k in data:
+            if k not in ("brand", "name", "sku"):
+                data[k] = data[k].replace(",", ".") or "0"
+
+        if not (data["brand"] and data["name"] and data["sku"]):
             flash("Marca, Producto y SKU son obligatorios.")
             return redirect(url_for("new_product"))
+
         db = get_db()
         try:
-            db.execute(
-                "INSERT INTO products(brand, name, sku, weight_kg, fob_usd) VALUES (?, ?, ?, ?, ?)",
-                (brand, name, sku, weight, fob),
-            )
+            db.execute("""
+                INSERT INTO products (
+                    brand, name, sku, fob_usd, peso_kg, costo_flete_usd_kg, costo_financiero,
+                    arancel, aduana, despachante, banco, iva, envio_ars, margen_neto, precio_manual_ars
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, tuple(data.values()))
             db.commit()
             flash("Producto creado.")
             pid = db.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
@@ -536,21 +540,43 @@ def new_product():
 
     body = r"""
     <h1 class="text-xl font-semibold mb-3">Nuevo producto</h1>
-    <form method="post" class="grid gap-3 max-w-xl">
-      <input name="brand" placeholder="Marca" class="border p-2 rounded" />
-      <input name="name" placeholder="Nombre / Modelo" class="border p-2 rounded" />
-      <input name="sku" placeholder="SKU" class="border p-2 rounded" />
-      <div class="grid grid-cols-2 gap-2">
-        <input name="weight_kg" placeholder="Peso (kg)" class="border p-2 rounded" />
-        <input name="fob_usd" placeholder="FOB (USD)" class="border p-2 rounded" />
+    <form method="post" class="grid gap-3 max-w-4xl bg-white p-4 rounded border">
+      <div class="grid md:grid-cols-3 gap-3">
+        <input name="brand" placeholder="Marca" class="border p-2 rounded" />
+        <input name="name" placeholder="Nombre / Modelo" class="border p-2 rounded" />
+        <input name="sku" placeholder="SKU" class="border p-2 rounded" />
       </div>
-      <button class="px-3 py-2 bg-slate-900 text-white rounded">Guardar</button>
+
+      <div class="grid md:grid-cols-4 gap-3 text-sm">
+        <input name="fob_usd" placeholder="FOB (USD)" class="border p-2 rounded" />
+        <input name="peso_kg" placeholder="Peso (kg)" class="border p-2 rounded" />
+        <input name="costo_flete_usd_kg" placeholder="Flete USD/kg" class="border p-2 rounded" />
+        <input name="costo_financiero" placeholder="% Financiero (ej. 0.04)" class="border p-2 rounded" />
+      </div>
+
+      <div class="grid md:grid-cols-4 gap-3 text-sm">
+        <input name="arancel" placeholder="Arancel (ej. 0.16)" class="border p-2 rounded" />
+        <input name="aduana" placeholder="Aduana / Estadística (ej. 0.0053)" class="border p-2 rounded" />
+        <input name="despachante" placeholder="Despachante (ej. 0.0095)" class="border p-2 rounded" />
+        <input name="banco" placeholder="Banco (ej. 0.004)" class="border p-2 rounded" />
+      </div>
+
+      <div class="grid md:grid-cols-3 gap-3 text-sm">
+        <input name="iva" placeholder="IVA (0.105 o 0.21)" class="border p-2 rounded" />
+        <input name="envio_ars" placeholder="Costo Envío (ARS)" class="border p-2 rounded" />
+        <input name="margen_neto" placeholder="% Margen Neto (ej. 0.06)" class="border p-2 rounded" />
+      </div>
+
+      <div class="grid md:grid-cols-1 gap-3 text-sm">
+        <input name="precio_manual_ars" placeholder="Precio manual (ARS, opcional)" class="border p-2 rounded" />
+      </div>
+
+      <button class="px-3 py-2 bg-slate-900 text-white rounded mt-2">Guardar</button>
     </form>
     """
     return page(body, title="Nuevo producto | " + APP_TITLE)
 
 @app.route("/product/<int:pid>", methods=["GET", "POST"])
-@login_required
 def edit_product(pid: int):
     init_db()
     db = get_db()
@@ -560,22 +586,20 @@ def edit_product(pid: int):
         return redirect(url_for("home"))
 
     if request.method == "POST":
-        brand = (request.form.get("brand") or p["brand"]).strip()
-        name = (request.form.get("name") or p["name"]).strip()
-        sku = (request.form.get("sku") or p["sku"]).strip()
-        weight = (request.form.get("weight_kg") or str(p["weight_kg"])).replace(",", ".")
-        fob = (request.form.get("fob_usd") or str(p["fob_usd"])).replace(",", ".")
+        data = {k: (request.form.get(k) or "").strip() for k in [
+            "brand", "name", "sku", "fob_usd", "peso_kg", "costo_flete_usd_kg", "costo_financiero",
+            "arancel", "aduana", "despachante", "banco", "iva", "envio_ars", "margen_neto", "precio_manual_ars"
+        ]}
+        for k in data:
+            if k not in ("brand", "name", "sku"):
+                data[k] = data[k].replace(",", ".") or "0"
         try:
-            weight = float(weight)
-            fob = float(fob)
-        except ValueError:
-            flash("Datos numéricos inválidos.")
-            return redirect(url_for("edit_product", pid=pid))
-        try:
-            db.execute(
-                "UPDATE products SET brand=?, name=?, sku=?, weight_kg=?, fob_usd=? WHERE id=?",
-                (brand, name, sku, weight, fob, pid),
-            )
+            db.execute("""
+                UPDATE products SET
+                  brand=?, name=?, sku=?, fob_usd=?, peso_kg=?, costo_flete_usd_kg=?, costo_financiero=?,
+                  arancel=?, aduana=?, despachante=?, banco=?, iva=?, envio_ars=?, margen_neto=?, precio_manual_ars=?, updated_at=datetime('now')
+                WHERE id=?
+            """, (*data.values(), pid))
             db.commit()
             flash("Producto actualizado.")
             return redirect(url_for("edit_product", pid=pid))
@@ -584,40 +608,65 @@ def edit_product(pid: int):
             return redirect(url_for("edit_product", pid=pid))
 
     vars_map = get_variables()
-    calc = calculate_prices(vars_map, p["fob_usd"], p["weight_kg"])
+    calc = calculate_prices(vars_map, p)
 
     body = render_template_string(
         r"""
         <h1 class="text-xl font-semibold mb-3">Editar producto</h1>
-        <form method="post" class="grid gap-3 max-w-xl mb-6">
-          <input name="brand" value="{{ p['brand'] }}" class="border p-2 rounded" />
-          <input name="name" value="{{ p['name'] }}" class="border p-2 rounded" />
-          <input name="sku" value="{{ p['sku'] }}" class="border p-2 rounded" />
-          <div class="grid grid-cols-2 gap-2">
-            <input name="weight_kg" value="{{ '%.3f' % p['weight_kg'] }}" class="border p-2 rounded" />
-            <input name="fob_usd" value="{{ '%.2f' % p['fob_usd'] }}" class="border p-2 rounded" />
+        <form method="post" class="grid gap-3 max-w-4xl bg-white p-4 rounded border">
+          <div class="grid md:grid-cols-3 gap-3">
+            <input name="brand" value="{{ p['brand'] }}" class="border p-2 rounded" />
+            <input name="name" value="{{ p['name'] }}" class="border p-2 rounded" />
+            <input name="sku" value="{{ p['sku'] }}" class="border p-2 rounded" />
           </div>
-          <button class="px-3 py-2 bg-slate-900 text-white rounded">Guardar</button>
+
+          <div class="grid md:grid-cols-4 gap-3 text-sm">
+            <input name="fob_usd" value="{{ p['fob_usd'] }}" class="border p-2 rounded" />
+            <input name="peso_kg" value="{{ p['peso_kg'] }}" class="border p-2 rounded" />
+            <input name="costo_flete_usd_kg" value="{{ p['costo_flete_usd_kg'] }}" class="border p-2 rounded" />
+            <input name="costo_financiero" value="{{ p['costo_financiero'] }}" class="border p-2 rounded" />
+          </div>
+
+          <div class="grid md:grid-cols-4 gap-3 text-sm">
+            <input name="arancel" value="{{ p['arancel'] }}" class="border p-2 rounded" />
+            <input name="aduana" value="{{ p['aduana'] }}" class="border p-2 rounded" />
+            <input name="despachante" value="{{ p['despachante'] }}" class="border p-2 rounded" />
+            <input name="banco" value="{{ p['banco'] }}" class="border p-2 rounded" />
+          </div>
+
+          <div class="grid md:grid-cols-3 gap-3 text-sm">
+            <input name="iva" value="{{ p['iva'] }}" class="border p-2 rounded" />
+            <input name="envio_ars" value="{{ p['envio_ars'] }}" class="border p-2 rounded" />
+            <input name="margen_neto" value="{{ p['margen_neto'] }}" class="border p-2 rounded" />
+          </div>
+
+          <div class="grid md:grid-cols-1 gap-3 text-sm">
+            <input name="precio_manual_ars" value="{{ p['precio_manual_ars'] or '' }}" class="border p-2 rounded" />
+          </div>
+
+          <button class="px-3 py-2 bg-slate-900 text-white rounded mt-2">Guardar</button>
         </form>
 
-        <div class="grid md:grid-cols-2 gap-4">
+        <div class="grid md:grid-cols-2 gap-4 mt-6">
           <div class="p-4 bg-white rounded border">
             <h2 class="font-semibold mb-2">Resumen de cálculo</h2>
             <div class="text-sm space-y-1">
               <div>CIF (USD): <strong>{{ '%.2f' % calc.cif_usd }}</strong></div>
-              <div>Costo USD: <strong>{{ '%.2f' % calc.costo_usd }}</strong></div>
+              <div>Costo Final USD: <strong>{{ '%.2f' % calc.costo_final_usd }}</strong></div>
               <div>PV Neto USD: <strong>{{ '%.2f' % calc.pv_neto_usd }}</strong></div>
+              <div>Margen Neto: <strong>{{ '%.2f' % (calc.margen_neto * 100) }}%</strong></div>
             </div>
           </div>
+
           <div class="p-4 bg-white rounded border">
-            <h2 class="font-semibold mb-2">Precios sugeridos</h2>
+            <h2 class="font-semibold mb-2">Precios sugeridos (IVA incluido)</h2>
             <div class="grid grid-cols-2 gap-2 text-sm">
-              <div>Web (ARS)</div><div class="text-right money"><strong>{{ money(calc.precio_web_ars) }}</strong></div>
-              <div>ML 1</div><div class="text-right money"><strong>{{ money(calc.precio_ml_1_ars) }}</strong></div>
-              <div>ML 3</div><div class="text-right money"><strong>{{ money(calc.precio_ml_3_ars) }}</strong></div>
-              <div>ML 6</div><div class="text-right money"><strong>{{ money(calc.precio_ml_6_ars) }}</strong></div>
-              <div>ML 9</div><div class="text-right money"><strong>{{ money(calc.precio_ml_9_ars) }}</strong></div>
-              <div>ML 12</div><div class="text-right money"><strong>{{ money(calc.precio_ml_12_ars) }}</strong></div>
+              <div>WEB</div><div class="text-right"><strong>{{ money(calc.precio_web_ars) }}</strong></div>
+              <div>ML 1</div><div class="text-right"><strong>{{ money(calc.precio_ml_1_ars) }}</strong></div>
+              <div>ML 3</div><div class="text-right"><strong>{{ money(calc.precio_ml_3_ars) }}</strong></div>
+              <div>ML 6</div><div class="text-right"><strong>{{ money(calc.precio_ml_6_ars) }}</strong></div>
+              <div>ML 9</div><div class="text-right"><strong>{{ money(calc.precio_ml_9_ars) }}</strong></div>
+              <div>ML 12</div><div class="text-right"><strong>{{ money(calc.precio_ml_12_ars) }}</strong></div>
             </div>
           </div>
         </div>
